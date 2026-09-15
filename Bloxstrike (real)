@@ -1,3 +1,206 @@
 -- Bloxstrike | Real | Toggle on X
 -- by sv4tom0n
 
+if getgenv().BloxStrikeCombo then
+    for _, conn in ipairs(getgenv().BloxStrikeCombo.Connections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    getgenv().BloxStrikeCombo.Connections = {}
+    getgenv().BloxStrikeCombo.isEnabled = not getgenv().BloxStrikeCombo.isEnabled
+    return
+end
+
+getgenv().BloxStrikeCombo = {
+    Connections = {},
+    isEnabled = false
+}
+
+local function track(conn)
+    table.insert(getgenv().BloxStrikeCombo.Connections, conn)
+    return conn
+end
+
+local function safeGetgenv()
+    return getgenv or function() return {} end
+end
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local LocalPlayer = Players.LocalPlayer
+local Camera = workspace.CurrentCamera
+
+local isEnabled = false
+local HITBOX_SIZE = 6
+local HITBOX_TRANS = 0.5
+local visibleColor = Color3.fromRGB(0, 255, 0)
+local hiddenColor = Color3.fromRGB(255, 0, 0)
+local bombColor = Color3.fromRGB(0, 100, 255)
+
+local visCache = {}
+
+local function isTeammate(player)
+    if player.Team and LocalPlayer.Team and player.Team == LocalPlayer.Team then return true end
+    if player.Team and LocalPlayer.Team and player.Team.Name == LocalPlayer.Team.Name then return true end
+    if player.TeamColor == LocalPlayer.TeamColor and player.TeamColor.Name ~= "White" then return true end
+    if player:GetAttribute("Team") and player:GetAttribute("Team") == LocalPlayer:GetAttribute("Team") then return true end
+    return false
+end
+
+local function getLocalTeam()
+    local teamAttr = LocalPlayer:GetAttribute("Team")
+    if teamAttr then
+        local s = tostring(teamAttr):upper()
+        if s:find("CT") or s:find("COUNTER") or s:find("POLICE") then return "CT" end
+        if s:find("T") and not s:find("CT") then return "T" end
+    end
+    if LocalPlayer.Team then
+        local tn = LocalPlayer.Team.Name:upper()
+        if tn:find("CT") or tn:find("COUNTER") or tn:find("POLICE") then return "CT" end
+        if tn:find("T") and not tn:find("CT") then return "T" end
+    end
+    if LocalPlayer.TeamColor then
+        local cn = LocalPlayer.TeamColor.Name:upper()
+        if cn:find("BLUE") or cn:find("CYAN") or cn:find("LIGHT BLUE") then return "CT" end
+        if cn:find("RED") or cn:find("ORANGE") or cn:find("YELLOW") then return "T" end
+    end
+    return nil
+end
+
+local function hasBomb(player)
+    local attr = player:GetAttribute("HasBomb")
+    if attr ~= nil then return attr == true or attr == 1 end
+
+    local char = player.Character
+    if char then
+        for _, item in ipairs(char:GetChildren()) do
+            if item:IsA("Tool") then
+                local name = item.Name:upper()
+                if name:find("C4") or name:find("BOMB") then
+                    return true
+                end
+            end
+        end
+    end
+
+    for i = 1, 5 do
+        local slot = player:GetAttribute("Slot" .. i)
+        if slot then
+            local s = tostring(slot):upper()
+            if s:find("C4") or s:find("BOMB") then return true end
+        end
+    end
+
+    local ce = player:GetAttribute("CurrentEquipped")
+    if ce then
+        local s = tostring(ce):upper()
+        if s:find("C4") or s:find("BOMB") then return true end
+    end
+
+    return false
+end
+
+local function isVisible(player)
+    local char = player.Character
+    if not char then return false end
+    local head = char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+    if not head then return false end
+    local parts = Camera:GetPartsObscuringTarget({head.Position}, {LocalPlayer.Character, char})
+    local anyVisible = (#parts == 0)
+    if anyVisible then
+        visCache[player] = tick()
+        return true
+    elseif visCache[player] and (tick() - visCache[player]) < 0.25 then
+        return true
+    end
+    return false
+end
+
+local function applyHitbox(char)
+    local root = char:WaitForChild("HumanoidRootPart", 5)
+    if root then
+        if isEnabled then
+            root.Size = Vector3.new(HITBOX_SIZE, HITBOX_SIZE, HITBOX_SIZE)
+            root.Transparency = HITBOX_TRANS
+            root.CanCollide = false
+        else
+            root.Size = Vector3.new(2, 2, 1)
+            root.Transparency = 1
+            root.CanCollide = false
+        end
+    end
+end
+
+local function setupPlayer(otherPlayer)
+    if otherPlayer == LocalPlayer then return end
+    if otherPlayer.Character then
+        applyHitbox(otherPlayer.Character)
+    end
+    track(otherPlayer.CharacterAdded:Connect(applyHitbox))
+end
+
+for _, otherPlayer in ipairs(Players:GetPlayers()) do
+    setupPlayer(otherPlayer)
+end
+track(Players.PlayerAdded:Connect(setupPlayer))
+
+local function reapplyHitboxes()
+    for _, otherPlayer in ipairs(Players:GetPlayers()) do
+        if otherPlayer ~= LocalPlayer and otherPlayer.Character then
+            applyHitbox(otherPlayer.Character)
+        end
+    end
+end
+
+local function cleanupESP()
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            local h = player.Character:FindFirstChild("Highlight_Elite")
+            if h then h:Destroy() end
+        end
+    end
+end
+
+track(RunService.RenderStepped:Connect(function()
+    local localTeam = getLocalTeam()
+
+    for _, player in pairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+        local char = player.Character
+        if char and char:FindFirstChild("HumanoidRootPart") then
+            local h = char:FindFirstChild("Highlight_Elite")
+            local shouldShow = isEnabled and (not isTeammate(player))
+
+            if shouldShow then
+                if not h then
+                    h = Instance.new("Highlight", char)
+                    h.Name = "Highlight_Elite"
+                    h.FillTransparency = 0
+                    h.OutlineColor = Color3.new(1, 1, 1)
+                end
+                h.Enabled = true
+
+                local carryingBomb = hasBomb(player)
+                if carryingBomb and localTeam == "CT" then
+                    h.FillColor = bombColor
+                else
+                    h.FillColor = isVisible(player) and visibleColor or hiddenColor
+                end
+            else
+                if h then h:Destroy() end
+            end
+        end
+    end
+end))
+
+track(UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.X then
+        isEnabled = not isEnabled
+        getgenv().BloxStrikeCombo.isEnabled = isEnabled
+        if not isEnabled then
+            cleanupESP()
+        end
+        reapplyHitboxes()
+    end
+end))
