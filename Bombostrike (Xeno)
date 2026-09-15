@@ -4,6 +4,7 @@
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
+local TweenService = game:GetService("TweenService")
 local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 
@@ -17,7 +18,20 @@ local bombColor = Color3.fromRGB(0, 100, 255)
 
 local visCache = {}
 
--- Team check
+local aim = {
+    targetOn = false,
+    targetPart = "Head",
+    radiusOn = false,
+    radiusVal = 5,
+    smoothOn = false,
+    smoothVal = 5,
+    targetBind = nil,
+    radiusBind = nil,
+    smoothBind = nil,
+}
+
+local pendingBind = nil
+
 local function isTeammate(player)
     if player.Team and LocalPlayer.Team and player.Team == LocalPlayer.Team then return true end
     if player.Team and LocalPlayer.Team and player.Team.Name == LocalPlayer.Team.Name then return true end
@@ -26,7 +40,6 @@ local function isTeammate(player)
     return false
 end
 
--- Определяем команду локального игрока (CT или T)
 local function getLocalTeam()
     local teamAttr = LocalPlayer:GetAttribute("Team")
     if teamAttr then
@@ -47,13 +60,9 @@ local function getLocalTeam()
     return nil
 end
 
--- Проверка: несёт ли игрок бомбу
 local function hasBomb(player)
-    -- Способ 1: атрибут HasBomb
     local attr = player:GetAttribute("HasBomb")
     if attr ~= nil then return attr == true or attr == 1 end
-
-    -- Способ 2: ищем Tool с именем C4/Bomb в инвентаре персонажа
     local char = player.Character
     if char then
         for _, item in ipairs(char:GetChildren()) do
@@ -65,31 +74,21 @@ local function hasBomb(player)
             end
         end
     end
-
-    -- Способ 3: проверяем атрибуты слотов на наличие C4/Bomb
     for i = 1, 5 do
         local slot = player:GetAttribute("Slot" .. i)
         if slot then
             local s = tostring(slot):upper()
-            if s:find("C4") or s:find("BOMB") then
-                return true
-            end
+            if s:find("C4") or s:find("BOMB") then return true end
         end
     end
-
-    -- Способ 4: проверяем CurrentEquipped
     local ce = player:GetAttribute("CurrentEquipped")
     if ce then
         local s = tostring(ce):upper()
-        if s:find("C4") or s:find("BOMB") then
-            return true
-        end
+        if s:find("C4") or s:find("BOMB") then return true end
     end
-
     return false
 end
 
--- Wall check (visibility)
 local function isVisible(player)
     local char = player.Character
     if not char then return false end
@@ -106,7 +105,6 @@ local function isVisible(player)
     return false
 end
 
--- Hitbox expander
 local function applyHitbox(char)
     local root = char:WaitForChild("HumanoidRootPart", 5)
     if root then
@@ -143,52 +141,393 @@ local function reapplyHitboxes()
     end
 end
 
--- Solid ESP + wall check + team check + bomb carrier highlight
-local renderConnection
-local function startESP()
-    renderConnection = RunService.RenderStepped:Connect(function()
-        local localTeam = getLocalTeam()
+local function cleanupESP()
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            local h = player.Character:FindFirstChild("Highlight_Elite")
+            if h then h:Destroy() end
+        end
+    end
+end
 
-        for _, player in pairs(Players:GetPlayers()) do
-            if player == LocalPlayer then continue end
-            local char = player.Character
-            if char and char:FindFirstChild("HumanoidRootPart") then
-                local h = char:FindFirstChild("Highlight_Elite")
-                local shouldShow = isEnabled and (not isTeammate(player))
-
-                if shouldShow then
-                    if not h then
-                        h = Instance.new("Highlight", char)
-                        h.Name = "Highlight_Elite"
-                        h.FillTransparency = 0
-                        h.OutlineColor = Color3.new(1, 1, 1)
-                    end
-                    h.Enabled = true
-
-                    -- Логика цвета:
-                    -- Если играем за CT и у врага есть бомба — синий
-                    -- Иначе — обычный wall check (зелёный/красный)
-                    local carryingBomb = hasBomb(player)
-                    if carryingBomb and localTeam == "CT" then
-                        h.FillColor = bombColor
-                    else
-                        h.FillColor = isVisible(player) and visibleColor or hiddenColor
-                    end
+RunService.RenderStepped:Connect(function()
+    local localTeam = getLocalTeam()
+    for _, player in pairs(Players:GetPlayers()) do
+        if player == LocalPlayer then continue end
+        local char = player.Character
+        if char and char:FindFirstChild("HumanoidRootPart") then
+            local h = char:FindFirstChild("Highlight_Elite")
+            local shouldShow = isEnabled and (not isTeammate(player))
+            if shouldShow then
+                if not h then
+                    h = Instance.new("Highlight", char)
+                    h.Name = "Highlight_Elite"
+                    h.FillTransparency = 0
+                    h.OutlineColor = Color3.new(1, 1, 1)
+                end
+                h.Enabled = true
+                local carryingBomb = hasBomb(player)
+                if carryingBomb and localTeam == "CT" then
+                    h.FillColor = bombColor
                 else
-                    if h then h:Destroy() end
+                    h.FillColor = isVisible(player) and visibleColor or hiddenColor
+                end
+            else
+                if h then h:Destroy() end
+            end
+        end
+    end
+end)
+
+RunService.RenderStepped:Connect(function()
+    if not aim.targetOn then return end
+    if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
+    if not LocalPlayer.Character then return end
+    local center = Camera.ViewportSize / 2
+    local closest = nil
+    local closestDist = math.huge
+    local fov = aim.radiusOn and (aim.radiusVal * 100) or math.huge
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            local char = player.Character
+            local hum = char:FindFirstChild("Humanoid")
+            if hum and hum.Health > 0 and not isTeammate(player) then
+                local part = aim.targetPart == "Head" and char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+                if part then
+                    if not isVisible(player) then continue end
+                    local pos, onScreen = Camera:WorldToViewportPoint(part.Position)
+                    if onScreen then
+                        local dist = (Vector2.new(pos.X, pos.Y) - center).Magnitude
+                        if dist < fov and dist < closestDist then
+                            closest = part
+                            closestDist = dist
+                        end
+                    end
                 end
             end
         end
+    end
+    if closest then
+        if aim.smoothOn then
+            local smooth = aim.smoothVal / 10
+            Camera.CFrame = Camera.CFrame:Lerp(CFrame.lookAt(Camera.CFrame.Position, closest.Position), smooth)
+        else
+            Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, closest.Position)
+        end
+    end
+end)
+
+local function getGuiParent()
+    local ok, result = pcall(function()
+        if gethui then return gethui() end
     end)
+    if ok and result then return result end
+    local ok2, cg = pcall(function()
+        return game:GetService("CoreGui")
+    end)
+    if ok2 and cg then return cg end
+    return LocalPlayer:WaitForChild("PlayerGui")
 end
 
-startESP()
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "BloxStrikeUI"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = getGuiParent()
 
--- Toggle on "X"
+local bar = Instance.new("Frame")
+bar.Size = UDim2.new(0, 110, 0, 24)
+bar.Position = UDim2.new(1, -130, 0, 20)
+bar.BackgroundColor3 = Color3.fromRGB(25, 25, 25)
+bar.BorderSizePixel = 0
+bar.Parent = screenGui
+
+local barCorner = Instance.new("UICorner")
+barCorner.CornerRadius = UDim.new(0, 6)
+barCorner.Parent = bar
+
+local statusDot = Instance.new("Frame")
+statusDot.Size = UDim2.new(0, 8, 0, 8)
+statusDot.Position = UDim2.new(0, 6, 0, 8)
+statusDot.BackgroundColor3 = Color3.fromRGB(170, 0, 0)
+statusDot.BorderSizePixel = 0
+statusDot.Parent = bar
+
+local dotCorner = Instance.new("UICorner")
+dotCorner.CornerRadius = UDim.new(1, 0)
+dotCorner.Parent = statusDot
+
+local barLabel = Instance.new("TextLabel")
+barLabel.Size = UDim2.new(1, -32, 1, 0)
+barLabel.Position = UDim2.new(0, 18, 0, 0)
+barLabel.BackgroundTransparency = 1
+barLabel.Text = "BloxStrike"
+barLabel.TextColor3 = Color3.fromRGB(0, 170, 255)
+barLabel.Font = Enum.Font.GothamBold
+barLabel.TextSize = 11
+barLabel.Parent = bar
+
+local arrow = Instance.new("TextLabel")
+arrow.Size = UDim2.new(0, 14, 1, 0)
+arrow.Position = UDim2.new(1, -16, 0, 0)
+arrow.BackgroundTransparency = 1
+arrow.Text = "\u{25B8}"
+arrow.TextColor3 = Color3.fromRGB(255, 255, 255)
+arrow.Font = Enum.Font.Gotham
+arrow.TextSize = 10
+arrow.Parent = bar
+
+local panel = Instance.new("Frame")
+panel.Size = UDim2.new(0, 230, 0, 0)
+panel.Position = UDim2.new(1, -250, 0, 48)
+panel.BackgroundColor3 = Color3.fromRGB(30, 30, 30)
+panel.BorderSizePixel = 0
+panel.Visible = false
+panel.ClipsDescendants = true
+panel.Parent = screenGui
+
+local panelCorner = Instance.new("UICorner")
+panelCorner.CornerRadius = UDim.new(0, 8)
+panelCorner.Parent = panel
+
+local function makeLabel(parent, x, y, w, text)
+    local lbl = Instance.new("TextLabel")
+    lbl.Size = UDim2.new(0, w, 0, 22)
+    lbl.Position = UDim2.new(0, x, 0, y)
+    lbl.BackgroundTransparency = 1
+    lbl.Text = text
+    lbl.TextColor3 = Color3.fromRGB(200, 200, 200)
+    lbl.Font = Enum.Font.Gotham
+    lbl.TextSize = 10
+    lbl.TextXAlignment = Enum.TextXAlignment.Left
+    lbl.Parent = parent
+    return lbl
+end
+
+local function makeToggle(parent, x, y, w, h, state, onToggle)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, w, 0, h)
+    btn.Position = UDim2.new(0, x, 0, y)
+    btn.BorderSizePixel = 0
+    btn.Font = Enum.Font.GothamBold
+    btn.TextSize = 9
+    btn.TextColor3 = Color3.fromRGB(255, 255, 255)
+    btn.Parent = parent
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 4)
+    corner.Parent = btn
+    local s = state
+    local function update()
+        btn.BackgroundColor3 = s and Color3.fromRGB(0, 150, 0) or Color3.fromRGB(150, 0, 0)
+        btn.Text = s and "ON" or "OFF"
+    end
+    update()
+    btn.MouseButton1Click:Connect(function()
+        s = not s
+        update()
+        onToggle(s)
+    end)
+    return btn, function() return s end, function(ns) s = ns; update() end
+end
+
+local function makeBindBtn(parent, x, y, w, h, onBind)
+    local btn = Instance.new("TextButton")
+    btn.Size = UDim2.new(0, w, 0, h)
+    btn.Position = UDim2.new(0, x, 0, y)
+    btn.BackgroundColor3 = Color3.fromRGB(40, 40, 40)
+    btn.BorderSizePixel = 0
+    btn.Text = "None"
+    btn.TextColor3 = Color3.fromRGB(180, 180, 180)
+    btn.Font = Enum.Font.Gotham
+    btn.TextSize = 9
+    btn.Parent = parent
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 4)
+    corner.Parent = btn
+    btn.MouseButton1Click:Connect(function()
+        pendingBind = function(key)
+            btn.Text = key.Name
+            onBind(key)
+        end
+        btn.Text = "..."
+    end)
+    return btn
+end
+
+local function makeSlider(parent, x, y, w, minVal, maxVal, default, onChange)
+    local bg = Instance.new("Frame")
+    bg.Size = UDim2.new(0, w, 0, 10)
+    bg.Position = UDim2.new(0, x, 0, y + 6)
+    bg.BackgroundColor3 = Color3.fromRGB(50, 50, 50)
+    bg.BorderSizePixel = 0
+    bg.Parent = parent
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(0, 4)
+    corner.Parent = bg
+    local fill = Instance.new("Frame")
+    fill.Size = UDim2.new((default - minVal) / (maxVal - minVal), 0, 1, 0)
+    fill.BackgroundColor3 = Color3.fromRGB(0, 170, 255)
+    fill.BorderSizePixel = 0
+    fill.Parent = bg
+    local fCorner = Instance.new("UICorner")
+    fCorner.CornerRadius = UDim.new(0, 4)
+    fCorner.Parent = fill
+    local val = default
+    local dragging = false
+    local function set(v)
+        val = math.clamp(math.floor(v), minVal, maxVal)
+        fill.Size = UDim2.new((val - minVal) / (maxVal - minVal), 0, 1, 0)
+        onChange(val)
+    end
+    bg.InputBegan:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = true
+            local pct = (input.Position.X - bg.AbsolutePosition.X) / bg.AbsoluteSize.X
+            set(minVal + pct * (maxVal - minVal))
+        end
+    end)
+    UserInputService.InputChanged:Connect(function(input)
+        if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement) then
+            local pct = math.clamp((input.Position.X - bg.AbsolutePosition.X) / bg.AbsoluteSize.X, 0, 1)
+            set(minVal + pct * (maxVal - minVal))
+        end
+    end)
+    UserInputService.InputEnded:Connect(function(input)
+        if input.UserInputType == Enum.UserInputType.MouseButton1 then
+            dragging = false
+        end
+    end)
+    return bg, function() return val end
+end
+
+local row1Y = 8
+local row2Y = 42
+local row3Y = 76
+
+makeLabel(panel, 8, row1Y, 45, "Target")
+local partBtn = Instance.new("TextButton")
+partBtn.Size = UDim2.new(0, 55, 0, 22)
+partBtn.Position = UDim2.new(0, 56, 0, row1Y)
+partBtn.BackgroundColor3 = Color3.fromRGB(45, 45, 45)
+partBtn.BorderSizePixel = 0
+partBtn.Text = "Head"
+partBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+partBtn.Font = Enum.Font.Gotham
+partBtn.TextSize = 10
+partBtn.Parent = panel
+local partCorner = Instance.new("UICorner")
+partCorner.CornerRadius = UDim.new(0, 4)
+partCorner.Parent = partBtn
+partBtn.MouseButton1Click:Connect(function()
+    aim.targetPart = aim.targetPart == "Head" and "Body" or "Head"
+    partBtn.Text = aim.targetPart
+end)
+
+local t1Btn, t1Get, t1Set = makeToggle(panel, 116, row1Y, 38, 22, false, function(s) aim.targetOn = s end)
+local aim_setTargetToggle = t1Set
+makeBindBtn(panel, 160, row1Y, 50, 22, function(key) aim.targetBind = key end)
+
+local rLabel = makeLabel(panel, 8, row2Y, 45, "FOV: 5")
+makeSlider(panel, 56, row2Y, 55, 1, 10, 5, function(v)
+    aim.radiusVal = v
+    rLabel.Text = "FOV: " .. v
+end)
+local t2Btn, t2Get, t2Set = makeToggle(panel, 116, row2Y, 38, 22, false, function(s) aim.radiusOn = s end)
+local aim_setRadiusToggle = t2Set
+makeBindBtn(panel, 160, row2Y, 50, 22, function(key) aim.radiusBind = key end)
+
+local sLabel = makeLabel(panel, 8, row3Y, 45, "Smt: 5")
+makeSlider(panel, 56, row3Y, 55, 1, 10, 5, function(v)
+    aim.smoothVal = v
+    sLabel.Text = "Smt: " .. v
+end)
+local t3Btn, t3Get, t3Set = makeToggle(panel, 116, row3Y, 38, 22, false, function(s) aim.smoothOn = s end)
+local aim_setSmoothToggle = t3Set
+makeBindBtn(panel, 160, row3Y, 50, 22, function(key) aim.smoothBind = key end)
+
+local expanded = false
+local barDragging = false
+local barDragStart = nil
+local barStartPos = nil
+local barMoved = false
+
+bar.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        barDragging = true
+        barDragStart = input.Position
+        barStartPos = bar.Position
+        barMoved = false
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if barDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - barDragStart
+        if delta.Magnitude > 3 then
+            barMoved = true
+        end
+        if barMoved then
+            local newX = math.clamp(barStartPos.X.Offset + delta.X, 0, Camera.ViewportSize.X - bar.AbsoluteSize.X)
+            local newY = math.clamp(barStartPos.Y.Offset + delta.Y, 0, Camera.ViewportSize.Y - bar.AbsoluteSize.Y)
+            bar.Position = UDim2.new(0, newX, 0, newY)
+            panel.Position = UDim2.new(0, newX, 0, newY + 28)
+        end
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) and barDragging then
+        if not barMoved then
+            expanded = not expanded
+            arrow.Text = expanded and "\u{25BE}" or "\u{25B8}"
+            if expanded then
+                panel.Visible = true
+                panel.Size = UDim2.new(0, 230, 0, 0)
+                local tween = TweenService:Create(panel, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 230, 0, 110)})
+                tween:Play()
+            else
+                local tween = TweenService:Create(panel, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 230, 0, 0)})
+                tween:Play()
+                tween.Completed:Connect(function()
+                    if not expanded then
+                        panel.Visible = false
+                    end
+                end)
+            end
+        end
+        barDragging = false
+        barDragStart = nil
+        barMoved = false
+    end
+end)
+
 UserInputService.InputBegan:Connect(function(input, gameProcessed)
+    if pendingBind then
+        if input.KeyCode ~= Enum.KeyCode.Unknown then
+            local fn = pendingBind
+            pendingBind = nil
+            fn(input.KeyCode)
+        end
+        return
+    end
     if gameProcessed then return end
     if input.KeyCode == Enum.KeyCode.X then
         isEnabled = not isEnabled
+        statusDot.BackgroundColor3 = isEnabled and Color3.fromRGB(0, 150, 0) or Color3.fromRGB(170, 0, 0)
+        if not isEnabled then
+            cleanupESP()
+        end
         reapplyHitboxes()
+    end
+    if aim.targetBind and input.KeyCode == aim.targetBind then
+        aim.targetOn = not aim.targetOn
+        if aim_setTargetToggle then aim_setTargetToggle(aim.targetOn) end
+    end
+    if aim.radiusBind and input.KeyCode == aim.radiusBind then
+        aim.radiusOn = not aim.radiusOn
+        if aim_setRadiusToggle then aim_setRadiusToggle(aim.radiusOn) end
+    end
+    if aim.smoothBind and input.KeyCode == aim.smoothBind then
+        aim.smoothOn = not aim.smoothOn
+        if aim_setSmoothToggle then aim_setSmoothToggle(aim.smoothOn) end
     end
 end)
