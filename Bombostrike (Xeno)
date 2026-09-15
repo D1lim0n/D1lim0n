@@ -1,6 +1,25 @@
 -- Bloxstrike | Xeno | Toggle on X
 -- by sv4tom0n
 
+if _G.BloxStrikeXeno then
+    for _, conn in ipairs(_G.BloxStrikeXeno.Connections) do
+        pcall(function() conn:Disconnect() end)
+    end
+    if _G.BloxStrikeXeno.GUI then
+        pcall(function() _G.BloxStrikeXeno.GUI:Destroy() end)
+    end
+end
+
+_G.BloxStrikeXeno = {
+    Connections = {},
+    GUI = nil
+}
+
+local function track(conn)
+    table.insert(_G.BloxStrikeXeno.Connections, conn)
+    return conn
+end
+
 local Players = game:GetService("Players")
 local UserInputService = game:GetService("UserInputService")
 local RunService = game:GetService("RunService")
@@ -28,6 +47,7 @@ local aim = {
     targetBind = nil,
     radiusBind = nil,
     smoothBind = nil,
+    uiBind = nil,
 }
 
 local pendingBind = nil
@@ -105,10 +125,10 @@ local function isVisible(player)
     return false
 end
 
-local function applyHitbox(char)
+local function applyHitbox(char, player)
     local root = char:WaitForChild("HumanoidRootPart", 5)
     if root then
-        if isEnabled then
+        if isEnabled and not isTeammate(player) then
             root.Size = Vector3.new(HITBOX_SIZE, HITBOX_SIZE, HITBOX_SIZE)
             root.Transparency = HITBOX_TRANS
             root.CanCollide = false
@@ -123,20 +143,22 @@ end
 local function setupPlayer(otherPlayer)
     if otherPlayer == LocalPlayer then return end
     if otherPlayer.Character then
-        applyHitbox(otherPlayer.Character)
+        applyHitbox(otherPlayer.Character, otherPlayer)
     end
-    otherPlayer.CharacterAdded:Connect(applyHitbox)
+    track(otherPlayer.CharacterAdded:Connect(function(char)
+        applyHitbox(char, otherPlayer)
+    end))
 end
 
 for _, otherPlayer in ipairs(Players:GetPlayers()) do
     setupPlayer(otherPlayer)
 end
-Players.PlayerAdded:Connect(setupPlayer)
+track(Players.PlayerAdded:Connect(setupPlayer))
 
 local function reapplyHitboxes()
     for _, otherPlayer in ipairs(Players:GetPlayers()) do
         if otherPlayer ~= LocalPlayer and otherPlayer.Character then
-            applyHitbox(otherPlayer.Character)
+            applyHitbox(otherPlayer.Character, otherPlayer)
         end
     end
 end
@@ -150,7 +172,7 @@ local function cleanupESP()
     end
 end
 
-RunService.RenderStepped:Connect(function()
+track(RunService.RenderStepped:Connect(function()
     local localTeam = getLocalTeam()
     for _, player in pairs(Players:GetPlayers()) do
         if player == LocalPlayer then continue end
@@ -177,29 +199,32 @@ RunService.RenderStepped:Connect(function()
             end
         end
     end
-end)
+end))
 
-RunService.RenderStepped:Connect(function()
-    if not aim.targetOn then return end
-    if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
-    if not LocalPlayer.Character then return end
-    local center = Camera.ViewportSize / 2
-    local closest = nil
+local function getClosestTarget()
+    if not LocalPlayer.Character then return nil end
+    local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    local closestPart = nil
     local closestDist = math.huge
-    local fov = aim.radiusOn and (aim.radiusVal * 100) or math.huge
+    local maxDist = aim.radiusOn and (aim.radiusVal * 100) or math.huge
     for _, player in pairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character then
             local char = player.Character
             local hum = char:FindFirstChild("Humanoid")
             if hum and hum.Health > 0 and not isTeammate(player) then
-                local part = aim.targetPart == "Head" and char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+                local part = nil
+                if aim.targetPart == "Head" then
+                    part = char:FindFirstChild("Head")
+                else
+                    part = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso") or char:FindFirstChild("UpperTorso")
+                end
                 if part then
                     if not isVisible(player) then continue end
-                    local pos, onScreen = Camera:WorldToViewportPoint(part.Position)
-                    if onScreen then
-                        local dist = (Vector2.new(pos.X, pos.Y) - center).Magnitude
-                        if dist < fov and dist < closestDist then
-                            closest = part
+                    local screenPos, onScreen = Camera:WorldToViewportPoint(part.Position)
+                    if onScreen and screenPos.Z > 0 then
+                        local dist = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+                        if dist < maxDist and dist < closestDist then
+                            closestPart = part
                             closestDist = dist
                         end
                     end
@@ -207,15 +232,26 @@ RunService.RenderStepped:Connect(function()
             end
         end
     end
-    if closest then
+    return closestPart
+end
+
+track(RunService.RenderStepped:Connect(function()
+    if not aim.targetOn then return end
+    if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
+    local target = getClosestTarget()
+    if target then
+        local currentCF = Camera.CFrame
+        local targetPos = target.Position
+        local lookPos = CFrame.lookAt(currentCF.Position, targetPos)
         if aim.smoothOn then
-            local smooth = aim.smoothVal / 10
-            Camera.CFrame = Camera.CFrame:Lerp(CFrame.lookAt(Camera.CFrame.Position, closest.Position), smooth)
+            local alpha = aim.smoothVal / 10
+            alpha = math.clamp(alpha, 0.01, 1)
+            Camera.CFrame = currentCF:Lerp(lookPos, alpha)
         else
-            Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, closest.Position)
+            Camera.CFrame = lookPos
         end
     end
-end)
+end))
 
 local function getGuiParent()
     local ok, result = pcall(function()
@@ -233,6 +269,7 @@ local screenGui = Instance.new("ScreenGui")
 screenGui.Name = "BloxStrikeUI"
 screenGui.ResetOnSpawn = false
 screenGui.Parent = getGuiParent()
+_G.BloxStrikeXeno.GUI = screenGui
 
 local bar = Instance.new("Frame")
 bar.Size = UDim2.new(0, 110, 0, 24)
@@ -385,17 +422,17 @@ local function makeSlider(parent, x, y, w, minVal, maxVal, default, onChange)
             set(minVal + pct * (maxVal - minVal))
         end
     end)
-    UserInputService.InputChanged:Connect(function(input)
+    track(UserInputService.InputChanged:Connect(function(input)
         if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement) then
             local pct = math.clamp((input.Position.X - bg.AbsolutePosition.X) / bg.AbsoluteSize.X, 0, 1)
             set(minVal + pct * (maxVal - minVal))
         end
-    end)
-    UserInputService.InputEnded:Connect(function(input)
+    end))
+    track(UserInputService.InputEnded:Connect(function(input)
         if input.UserInputType == Enum.UserInputType.MouseButton1 then
             dragging = false
         end
-    end)
+    end))
     return bg, function() return val end
 end
 
@@ -444,11 +481,33 @@ local t3Btn, t3Get, t3Set = makeToggle(panel, 116, row3Y, 38, 22, false, functio
 local aim_setSmoothToggle = t3Set
 makeBindBtn(panel, 160, row3Y, 50, 22, function(key) aim.smoothBind = key end)
 
+local uiBindLabel = makeLabel(panel, 8, 110, 60, "UI Bind:")
+local uiBindBtn = makeBindBtn(panel, 70, 110, 50, 22, function(key) aim.uiBind = key end)
+
 local expanded = false
 local barDragging = false
 local barDragStart = nil
 local barStartPos = nil
 local barMoved = false
+
+local function togglePanel()
+    expanded = not expanded
+    arrow.Text = expanded and "\u{25BE}" or "\u{25B8}"
+    if expanded then
+        panel.Visible = true
+        panel.Size = UDim2.new(0, 230, 0, 0)
+        local tween = TweenService:Create(panel, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 230, 0, 140)})
+        tween:Play()
+    else
+        local tween = TweenService:Create(panel, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 230, 0, 0)})
+        tween:Play()
+        tween.Completed:Connect(function()
+            if not expanded then
+                panel.Visible = false
+            end
+        end)
+    end
+end
 
 bar.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
@@ -459,7 +518,7 @@ bar.InputBegan:Connect(function(input)
     end
 end)
 
-UserInputService.InputChanged:Connect(function(input)
+track(UserInputService.InputChanged:Connect(function(input)
     if barDragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
         local delta = input.Position - barDragStart
         if delta.Magnitude > 3 then
@@ -472,35 +531,20 @@ UserInputService.InputChanged:Connect(function(input)
             panel.Position = UDim2.new(0, newX, 0, newY + 28)
         end
     end
-end)
+end))
 
-UserInputService.InputEnded:Connect(function(input)
+track(UserInputService.InputEnded:Connect(function(input)
     if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) and barDragging then
         if not barMoved then
-            expanded = not expanded
-            arrow.Text = expanded and "\u{25BE}" or "\u{25B8}"
-            if expanded then
-                panel.Visible = true
-                panel.Size = UDim2.new(0, 230, 0, 0)
-                local tween = TweenService:Create(panel, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 230, 0, 110)})
-                tween:Play()
-            else
-                local tween = TweenService:Create(panel, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 230, 0, 0)})
-                tween:Play()
-                tween.Completed:Connect(function()
-                    if not expanded then
-                        panel.Visible = false
-                    end
-                end)
-            end
+            togglePanel()
         end
         barDragging = false
         barDragStart = nil
         barMoved = false
     end
-end)
+end))
 
-UserInputService.InputBegan:Connect(function(input, gameProcessed)
+track(UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if pendingBind then
         if input.KeyCode ~= Enum.KeyCode.Unknown then
             local fn = pendingBind
@@ -530,4 +574,4 @@ UserInputService.InputBegan:Connect(function(input, gameProcessed)
         aim.smoothOn = not aim.smoothOn
         if aim_setSmoothToggle then aim_setSmoothToggle(aim.smoothOn) end
     end
-end)
+    if 
