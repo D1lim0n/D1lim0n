@@ -5,17 +5,13 @@ if getgenv().BloxStrikeCombo then
     for _, conn in ipairs(getgenv().BloxStrikeCombo.Connections) do
         pcall(function() conn:Disconnect() end)
     end
-    getgenv().BloxStrikeCombo.Connections = {}
     if getgenv().BloxStrikeCombo.GUI then
         pcall(function() getgenv().BloxStrikeCombo.GUI:Destroy() end)
     end
-    getgenv().BloxStrikeCombo.isEnabled = not getgenv().BloxStrikeCombo.isEnabled
-    return
 end
 
 getgenv().BloxStrikeCombo = {
     Connections = {},
-    isEnabled = false,
     GUI = nil
 }
 
@@ -129,10 +125,10 @@ local function isVisible(player)
     return false
 end
 
-local function applyHitbox(char)
+local function applyHitbox(char, player)
     local root = char:WaitForChild("HumanoidRootPart", 5)
     if root then
-        if isEnabled then
+        if isEnabled and not isTeammate(player) then
             root.Size = Vector3.new(HITBOX_SIZE, HITBOX_SIZE, HITBOX_SIZE)
             root.Transparency = HITBOX_TRANS
             root.CanCollide = false
@@ -147,9 +143,11 @@ end
 local function setupPlayer(otherPlayer)
     if otherPlayer == LocalPlayer then return end
     if otherPlayer.Character then
-        applyHitbox(otherPlayer.Character)
+        applyHitbox(otherPlayer.Character, otherPlayer)
     end
-    track(otherPlayer.CharacterAdded:Connect(applyHitbox))
+    track(otherPlayer.CharacterAdded:Connect(function(char)
+        applyHitbox(char, otherPlayer)
+    end))
 end
 
 for _, otherPlayer in ipairs(Players:GetPlayers()) do
@@ -160,7 +158,7 @@ track(Players.PlayerAdded:Connect(setupPlayer))
 local function reapplyHitboxes()
     for _, otherPlayer in ipairs(Players:GetPlayers()) do
         if otherPlayer ~= LocalPlayer and otherPlayer.Character then
-            applyHitbox(otherPlayer.Character)
+            applyHitbox(otherPlayer.Character, otherPlayer)
         end
     end
 end
@@ -558,7 +556,6 @@ track(UserInputService.InputBegan:Connect(function(input, gameProcessed)
     if gameProcessed then return end
     if input.KeyCode == Enum.KeyCode.X then
         isEnabled = not isEnabled
-        getgenv().BloxStrikeCombo.isEnabled = isEnabled
         statusDot.BackgroundColor3 = isEnabled and Color3.fromRGB(0, 150, 0) or Color3.fromRGB(170, 0, 0)
         if not isEnabled then
             cleanupESP()
@@ -573,4 +570,6 @@ track(UserInputService.InputBegan:Connect(function(input, gameProcessed)
         aim.radiusOn = not aim.radiusOn
         if aim_setRadiusToggle then aim_setRadiusToggle(aim.radiusOn) end
     end
-    if aim.smoothBind and in
+    if aim.smoothBind and input.KeyCode == aim.smoothBind then
+        aim.smoothOn = not aim.smoothOn
+        if aim_setSmoothToggle th
