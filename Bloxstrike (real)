@@ -32,6 +32,7 @@ local LocalPlayer = Players.LocalPlayer
 local Camera = workspace.CurrentCamera
 
 local isEnabled = false
+
 local HITBOX_SIZE = 6
 local HITBOX_TRANS = 0.5
 local visibleColor = Color3.fromRGB(0, 255, 0)
@@ -50,9 +51,7 @@ local aim = {
     targetBind = nil,
     radiusBind = nil,
     smoothBind = nil,
-    setTargetToggle = nil,
-    setRadiusToggle = nil,
-    setSmoothToggle = nil,
+    uiBind = nil,
 }
 
 local pendingBind = nil
@@ -204,27 +203,30 @@ track(RunService.RenderStepped:Connect(function()
     end
 end))
 
-track(RunService.RenderStepped:Connect(function()
-    if not aim.targetOn then return end
-    if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
-    if not LocalPlayer.Character then return end
-    local center = Camera.ViewportSize / 2
-    local closest = nil
+local function getClosestTarget()
+    if not LocalPlayer.Character then return nil end
+    local center = Vector2.new(Camera.ViewportSize.X / 2, Camera.ViewportSize.Y / 2)
+    local closestPart = nil
     local closestDist = math.huge
-    local fov = aim.radiusOn and (aim.radiusVal * 100) or math.huge
+    local maxDist = aim.radiusOn and (aim.radiusVal * 100) or math.huge
     for _, player in pairs(Players:GetPlayers()) do
         if player ~= LocalPlayer and player.Character then
             local char = player.Character
             local hum = char:FindFirstChild("Humanoid")
             if hum and hum.Health > 0 and not isTeammate(player) then
-                local part = aim.targetPart == "Head" and char:FindFirstChild("Head") or char:FindFirstChild("HumanoidRootPart")
+                local part = nil
+                if aim.targetPart == "Head" then
+                    part = char:FindFirstChild("Head")
+                else
+                    part = char:FindFirstChild("HumanoidRootPart") or char:FindFirstChild("Torso") or char:FindFirstChild("UpperTorso")
+                end
                 if part then
                     if not isVisible(player) then continue end
-                    local pos, onScreen = Camera:WorldToViewportPoint(part.Position)
-                    if onScreen then
-                        local dist = (Vector2.new(pos.X, pos.Y) - center).Magnitude
-                        if dist < fov and dist < closestDist then
-                            closest = part
+                    local screenPos, onScreen = Camera:WorldToViewportPoint(part.Position)
+                    if onScreen and screenPos.Z > 0 then
+                        local dist = (Vector2.new(screenPos.X, screenPos.Y) - center).Magnitude
+                        if dist < maxDist and dist < closestDist then
+                            closestPart = part
                             closestDist = dist
                         end
                     end
@@ -232,12 +234,23 @@ track(RunService.RenderStepped:Connect(function()
             end
         end
     end
-    if closest then
+    return closestPart
+end
+
+track(RunService.RenderStepped:Connect(function()
+    if not aim.targetOn then return end
+    if not UserInputService:IsMouseButtonPressed(Enum.UserInputType.MouseButton2) then return end
+    local target = getClosestTarget()
+    if target then
+        local currentCF = Camera.CFrame
+        local targetPos = target.Position
+        local lookPos = CFrame.lookAt(currentCF.Position, targetPos)
         if aim.smoothOn then
-            local smooth = aim.smoothVal / 10
-            Camera.CFrame = Camera.CFrame:Lerp(CFrame.lookAt(Camera.CFrame.Position, closest.Position), smooth)
+            local alpha = aim.smoothVal / 10
+            alpha = math.clamp(alpha, 0.01, 1)
+            Camera.CFrame = currentCF:Lerp(lookPos, alpha)
         else
-            Camera.CFrame = CFrame.lookAt(Camera.CFrame.Position, closest.Position)
+            Camera.CFrame = lookPos
         end
     end
 end))
@@ -449,7 +462,7 @@ partBtn.MouseButton1Click:Connect(function()
 end)
 
 local t1Btn, t1Get, t1Set = makeToggle(panel, 116, row1Y, 38, 22, false, function(s) aim.targetOn = s end)
-aim.setTargetToggle = t1Set
+local aim_setTargetToggle = t1Set
 makeBindBtn(panel, 160, row1Y, 50, 22, function(key) aim.targetBind = key end)
 
 local rLabel = makeLabel(panel, 8, row2Y, 45, "FOV: 5")
@@ -458,7 +471,7 @@ makeSlider(panel, 56, row2Y, 55, 1, 10, 5, function(v)
     rLabel.Text = "FOV: " .. v
 end)
 local t2Btn, t2Get, t2Set = makeToggle(panel, 116, row2Y, 38, 22, false, function(s) aim.radiusOn = s end)
-aim.setRadiusToggle = t2Set
+local aim_setRadiusToggle = t2Set
 makeBindBtn(panel, 160, row2Y, 50, 22, function(key) aim.radiusBind = key end)
 
 local sLabel = makeLabel(panel, 8, row3Y, 45, "Smt: 5")
@@ -467,14 +480,36 @@ makeSlider(panel, 56, row3Y, 55, 1, 10, 5, function(v)
     sLabel.Text = "Smt: " .. v
 end)
 local t3Btn, t3Get, t3Set = makeToggle(panel, 116, row3Y, 38, 22, false, function(s) aim.smoothOn = s end)
-aim.setSmoothToggle = t3Set
+local aim_setSmoothToggle = t3Set
 makeBindBtn(panel, 160, row3Y, 50, 22, function(key) aim.smoothBind = key end)
+
+local uiBindLabel = makeLabel(panel, 8, 110, 60, "UI Bind:")
+local uiBindBtn = makeBindBtn(panel, 70, 110, 50, 22, function(key) aim.uiBind = key end)
 
 local expanded = false
 local barDragging = false
 local barDragStart = nil
 local barStartPos = nil
 local barMoved = false
+
+local function togglePanel()
+    expanded = not expanded
+    arrow.Text = expanded and "\u{25BE}" or "\u{25B8}"
+    if expanded then
+        panel.Visible = true
+        panel.Size = UDim2.new(0, 230, 0, 0)
+        local tween = TweenService:Create(panel, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 230, 0, 140)})
+        tween:Play()
+    else
+        local tween = TweenService:Create(panel, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 230, 0, 0)})
+        tween:Play()
+        tween.Completed:Connect(function()
+            if not expanded then
+                panel.Visible = false
+            end
+        end)
+    end
+end
 
 bar.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
@@ -503,22 +538,7 @@ end))
 track(UserInputService.InputEnded:Connect(function(input)
     if (input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch) and barDragging then
         if not barMoved then
-            expanded = not expanded
-            arrow.Text = expanded and "\u{25BE}" or "\u{25B8}"
-            if expanded then
-                panel.Visible = true
-                panel.Size = UDim2.new(0, 230, 0, 0)
-                local tween = TweenService:Create(panel, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 230, 0, 110)})
-                tween:Play()
-            else
-                local tween = TweenService:Create(panel, TweenInfo.new(0.15, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {Size = UDim2.new(0, 230, 0, 0)})
-                tween:Play()
-                tween.Completed:Connect(function()
-                    if not expanded then
-                        panel.Visible = false
-                    end
-                end)
-            end
+            togglePanel()
         end
         barDragging = false
         barDragStart = nil
@@ -547,14 +567,10 @@ track(UserInputService.InputBegan:Connect(function(input, gameProcessed)
     end
     if aim.targetBind and input.KeyCode == aim.targetBind then
         aim.targetOn = not aim.targetOn
-        if aim.setTargetToggle then aim.setTargetToggle(aim.targetOn) end
+        if aim_setTargetToggle then aim_setTargetToggle(aim.targetOn) end
     end
     if aim.radiusBind and input.KeyCode == aim.radiusBind then
         aim.radiusOn = not aim.radiusOn
-        if aim.setRadiusToggle then aim.setRadiusToggle(aim.radiusOn) end
+        if aim_setRadiusToggle then aim_setRadiusToggle(aim.radiusOn) end
     end
-    if aim.smoothBind and input.KeyCode == aim.smoothBind then
-        aim.smoothOn = not aim.smoothOn
-        if aim.setSmoothToggle then aim.setSmoothToggle(aim.smoothOn) end
-    end
-end))
+    if aim.smoothBind and in
