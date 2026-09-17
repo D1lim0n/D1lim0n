@@ -1,0 +1,253 @@
+-- BloxStrike Ultimate: Functions Only (No GUI)
+-- Совместимость: Xeno Executor, Real, Fluxus и др.
+-- Бинды: Numpad 1 (Bhop), 2 (ESP), 3 (Wallhack), 4 (Grenade ESP), 7 (NoFall)
+
+if _G.BSX then 
+    for _,conn in ipairs(_G.BSX.Connections) do pcall(function() conn:Disconnect() end) end 
+    _G.BSX = nil 
+end
+
+_G.BSX = {
+    Connections = {},
+    State = {
+        Bhop = false,
+        ESP = false,
+        Wallhack = false,
+        GrenadeESP = false,
+        NoFall = false
+    }
+}
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+local LocalPlayer = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+-- Вспомогательная функция для безопасного подключения событий
+local function connectEvent(event, func)
+    local conn = event:Connect(func)
+    table.insert(_G.BSX.Connections, conn)
+    return conn
+end
+
+-- ==========================================
+-- 1. BHOB (Авто-прыжок)
+-- ==========================================
+connectEvent(UserInputService.InputBegan, function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.KeypadOne then
+        _G.BSX.State.Bhop = not _G.BSX.State.Bhop
+        print("Bhop: " .. (_G.BSX.State.Bhop and "ENABLED" or "DISABLED"))
+    end
+end)
+
+connectEvent(RunService.RenderStepped, function()
+    if not _G.BSX.State.Bhop then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChild("Humanoid")
+    local root = char:FindFirstChild("HumanoidRootPart")
+    if hum and root then
+        if UserInputService:IsKeyDown(Enum.KeyCode.Space) and hum.FloorMaterial ~= Enum.Material.Air then
+            hum.Jump = true
+        end
+    end
+end)
+
+-- ==========================================
+-- 2. NOFALL (Защита от падения)
+-- ==========================================
+connectEvent(UserInputService.InputBegan, function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.KeypadSeven then
+        _G.BSX.State.NoFall = not _G.BSX.State.NoFall
+        print("NoFall: " .. (_G.BSX.State.NoFall and "ENABLED" or "DISABLED"))
+    end
+end)
+
+connectEvent(RunService.Heartbeat, function()
+    if not _G.BSX.State.NoFall then return end
+    local char = LocalPlayer.Character
+    if not char then return end
+    local hum = char:FindFirstChild("Humanoid")
+    if hum then
+        if hum.Health < hum.MaxHealth then
+            local root = char:FindFirstChild("HumanoidRootPart")
+            if root and root.Velocity.Y < -10 then 
+                hum.Health = hum.MaxHealth
+            end
+        end
+    end
+end)
+
+-- ==========================================
+-- 3. ESP (Подсветка врагов)
+-- ==========================================
+local espConnections = {}
+local espFrames = {}
+
+connectEvent(UserInputService.InputBegan, function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.KeypadTwo then
+        _G.BSX.State.ESP = not _G.BSX.State.ESP
+        print("ESP: " .. (_G.BSX.State.ESP and "ENABLED" or "DISABLED"))
+        
+        if _G.BSX.State.ESP then
+            -- Создаем цикл обновления ESP
+            local function updateEsp()
+                pcall(function()
+                    for _, player in ipairs(Players:GetPlayers()) do
+                        if player == LocalPlayer then continue end
+                        local char = player.Character
+                        if char and char:FindFirstChild("Head") then
+                            local head = char.Head
+                            local pos, onScreen = Camera:WorldToViewportPoint(head.Position)
+                            if onScreen then
+                                -- Рисуем рамку (простой метод через BillboardGui, он надежнее сложных линий)
+                                if not espFrames[player] then
+                                    local billboard = Instance.new("BillboardGui")
+                                    billboard.Adornee = head
+                                    billboard.Size = UDim2.new(0, 4, 0, 4)
+                                    billboard.StudsOffset = Vector3.new(0, 2, 0)
+                                    billboard.AlwaysOnTop = true
+                                    billboard.Parent = char
+                                    
+                                    local frame = Instance.new("Frame")
+                                    frame.Size = UDim2.new(1, 0, 1, 0)
+                                    frame.BackgroundColor3 = Color3.fromRGB(255, 0, 0) -- Красный цвет врага
+                                    frame.BorderSizePixel = 0
+                                    frame.Parent = billboard
+                                    
+                                    espFrames[player] = billboard
+                                end
+                            else
+                                if espFrames[player] then
+                                    espFrames[player]:Destroy()
+                                    espFrames[player] = nil
+                                end
+                            end
+                        end
+                    end
+                end)
+            end
+            
+            espConnections.Update = connectEvent(RunService.RenderStepped, updateEsp)
+        else
+            -- Отключаем ESP
+            if espConnections.Update then espConnections.Update:Disconnect() end
+            for _, frame in pairs(espFrames) do
+                if frame and frame.Parent then frame:Destroy() end
+            end
+            espFrames = {}
+        end
+    end
+end)
+
+-- ==========================================
+-- 4. WALLHACK (Прозрачные стены)
+-- ==========================================
+local originalTransparency = {}
+
+connectEvent(UserInputService.InputBegan, function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.KeypadThree then
+        _G.BSX.State.Wallhack = not _G.BSX.State.Wallhack
+        print("Wallhack: " .. (_G.BSX.State.Wallhack and "ENABLED" or "DISABLED"))
+        
+        if _G.BSX.State.Wallhack then
+            for _, part in ipairs(Workspace:GetDescendants()) do
+                if part:IsA("BasePart") and part.Transparency < 1 then
+                    originalTransparency[part] = part.Transparency
+                    part.Transparency = 1
+                    part.CanCollide = false
+                end
+            end
+            -- Слушаем появление новых частей (например, разрушаемые стены)
+            connectEvent(Workspace.DescendantAdded, function(obj)
+                if obj:IsA("BasePart") and _G.BSX.State.Wallhack then
+                    originalTransparency[obj] = obj.Transparency
+                    obj.Transparency = 1
+                    obj.CanCollide = false
+                end
+            end)
+        else
+            -- Возвращаем прозрачность
+            for part, val in pairs(originalTransparency) do
+                if part and part.Parent then
+                    part.Transparency = val
+                    part.CanCollide = (val == 0)
+                end
+            end
+            originalTransparency = {}
+        end
+    end
+end)
+
+-- ==========================================
+-- 5. ESP ТРАЕКТОРИЙ ГРАНАТ (Grenade ESP)
+-- ==========================================
+local grenadeConnections = {}
+local grenadeBeams = {}
+
+connectEvent(UserInputService.InputBegan, function(input, gameProcessed)
+    if gameProcessed then return end
+    if input.KeyCode == Enum.KeyCode.KeypadFour then
+        _G.BSX.State.GrenadeESP = not _G.BSX.State.GrenadeESP
+        print("Grenade ESP: " .. (_G.BSX.State.GrenadeESP and "ENABLED" or "DISABLED"))
+        
+        if _G.BSX.State.GrenadeESP then
+            local function updateGrenades()
+                pcall(function()
+                    for _, player in ipairs(Players:GetPlayers()) do
+                        local char = player.Character
+                        if char then
+                            for _, tool in ipairs(char:GetChildren()) do
+                                if tool:IsA("Tool") and (tool.Name:lower():find("grenade") or tool.Name:lower():find("bomb")) then
+                                    local root = char:FindFirstChild("HumanoidRootPart")
+                                    if root then
+                                        -- Простая визуализация: луч от игрока до предполагаемой точки броска
+                                        -- В реальном времени сложно предсказать точку падения без физики сервера,
+                                        -- поэтому рисуем луч от игрока в направлении камеры или текущей позиции гранаты.
+                                        
+                                        if not grenadeBeams[tool] then
+                                            local att0 = Instance.new("Attachment")
+                                            att0.Position = Vector3.new(0, 2, 0)
+                                            att0.Parent = root
+                                            
+                                            local att1 = Instance.new("Attachment")
+                                            att1.Parent = tool -- Граната как цель
+                                            
+                                            local beam = Instance.new("Beam")
+                                            beam.Attachment0 = att0
+                                            beam.Attachment1 = att1
+                                            beam.Color = ColorSequence.new(Color3.fromRGB(255, 255, 0)) -- Желтый
+                                            beam.Width0 = 0.2
+                                            beam.Width1 = 0.2
+                                            beam.Parent = root
+                                            
+                                            grenadeBeams[tool] = {Beam = beam, Att0 = att0, Att1 = att1}
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end)
+            end
+            grenadeConnections.Update = connectEvent(RunService.RenderStepped, updateGrenades)
+        else
+            if grenadeConnections.Update then grenadeConnections.Update:Disconnect() end
+            for _, data in pairs(grenadeBeams) do
+                if data.Beam then data.Beam:Destroy() end
+                if data.Att0 then data.Att0:Destroy() end
+                if data.Att1 then data.Att1:Destroy() end
+            end
+            grenadeBeams = {}
+        end
+    end
+end)
+
+print("BloxStrike Ultimate Loaded. No GUI. Use Numpad keys.")
+print("Numpad 1: Bhop | 2: ESP | 3: Wallhack | 4: Grenade ESP | 7: NoFall")
