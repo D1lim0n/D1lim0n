@@ -1,6 +1,7 @@
 -- Bloxstrike | Real | Toggle on X
 -- by sv4tom0n
 
+print("BSR SCRIPT LOADED SUCCESSFULLY")
 if getgenv().BSR then for g,h in ipairs(getgenv().BSR.C)do pcall(function()h:Disconnect()end)end if getgenv().BSR.G then pcall(function()getgenv().BSR.G:Destroy()end)end end
 getgenv().BSR={C={},G=nil}local function i(g)table.insert(getgenv().BSR.C,g)return g end
 local a=game:GetService("Players")local b=game:GetService("UserInputService")local c=game:GetService("RunService")local d=game:GetService("TweenService")local e=a.LocalPlayer local f=workspace.CurrentCamera
